@@ -1,0 +1,91 @@
+---
+title: "MSM"
+author: "CHEN HU"
+date: "04/18/2025"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(data.table)
+library(dplyr)
+library(msm)
+library(reshape)
+library(readxl)
+library(lubridate)
+library(splines)
+```
+The version follow Valery eamil Final Model Specification for PDDS Transition Analysis on April 30
+### Specifying Q matrix 
+```{r}
+msdat=read.csv("../DATA/2025/MSDAT_20250404.csv") #1070 ID and 3803 PDDS
+summary(msdat$obstime)
+msdat = msdat %>% group_by(id) %>% 
+  mutate(dd = as.numeric(as.Date(reviewdate[visit==1])-as.Date(datefde)))
+msdat= msdat %>% mutate(dd=ifelse(dd<0, 0, dd), dd=log(dd/365.25+1))
+
+dmt=read.csv("../DATA/2025/CleanDMT.csv")
+dmt=dmt %>% filter(dmt==1 ) %>% 
+  group_by(id) %>% 
+  mutate(trt_start = min(as.Date(dmtstartdate))) %>%
+  distinct(id, trt_start)
+msdat2=left_join(msdat, dmt, by="id")
+msdat2=msdat2 %>% mutate(tage= round(as.numeric((as.Date(trt_start)-as.Date(dob))/365.25),6),
+                         rage=round(as.numeric((as.Date(reviewdate)-as.Date(dob))/365.25),6),#review age
+                         oage= round(as.numeric((as.Date(datefde)-as.Date(dob))/365.25),6), #oage
+                         tage= ifelse(is.na(tage)==T, NA, ifelse(tage<oage, oage, tage)),
+                         tage=ifelse(is.na(tage)==T, rage, tage),
+                       tagecat= ifelse(tage >50, "2", ifelse(tage>30,"1", "0")),
+                       tagecat = factor(tagecat, levels = c("0","1","2")))
+                    
+msdat2=msdat2 %>% mutate(tdelay=round(tage-oage, 6),
+                       tdelay= ifelse(tdelay<=0, 0, tdelay),
+                       tdelay=log(tdelay+1))
+
+
+msdat=msdat2
+Q <- statetable.msm(state = state, subject = id, data = msdat); Q
+Q<-round(Q/rowSums(Q),6); Q
+Q=rbind(Q,"5"=rep(0,5)); Q
+Q.start<-crudeinits.msm(state  ~ obstime, id, data=msdat, qmatrix=Q)
+Q.start
+ 
+```
+```{r}
+msdat$on_high=msdat$on_high2
+msdat$on_low=msdat$on_low2
+qconstraint<-c(1,2,3,3, 1,4,5,5, 2,4,6,6, 3,5,7,8)
+msdat$obstype<-ifelse(msdat$state==5, 3, 2) #I tried this obstype, but my model didn’t converge. So I used obstype=2 instead. Just use obstype=2 or try the same if it converges, then fine.
+qconstraint<-c(1,2,3,3, 1,4,5,5, 2,4,6,6, 3,5,7,8)
+constraint<-list(on_high=c(-1,-2,-3, -4,  1,-5,-6, -7,  2,5,-8,-9,  3,6,8,-10),
+                 on_low=c(-1,-2,-3, -4,  1,-5,-6, -7,  2,5,-8,-9,  3,6,8,-10),
+                 ddmt_high=c(-1,-2,-3, -4,  1,-5,-6, -7,  2,5,-8,-9,  3,6,8,-10),
+                 ddmt_low=c(-1,-2,-3, -4,  1,-5,-6, -7,  2,5,-8,-9,  3,6,8,-10),
+                 tsymp=c(1,2,3, 4,  -1,5,6,7,  -2,-5,8,9, -3,-6,-8,10),
+                 sex=c(1,2,3, 4,  -1,5,6,7,  -2,-5,8,9, -3,-6,-8,10),
+                 progstat=c(1,2,3, 4,  -1,5,6,7,  -2,-5,8,9, -3,-6,-8,10),
+                 tdelay =c(1,2,3, 4,  -1,5,6,7,  -2,-5,8,9, -3,-6,-8,10),
+                 dd     =c(1,2,3, 4,  -1,5,6,7,  -2,-5,8,9, -3,-6,-8,10),
+                 "tagecat1"=c(1,2,3, 4,  -1,5,6,7,  -2,-5,8,9, -3,-6,-8,10),
+                 "tagecat2"=c(1,2,3, 4,  -1,5,6,7,  -2,-5,8,9, -3,-6,-8,10),                 
+                 "tagecat1:on_high"=c(1,2,3, 4,  -1,5,6,7,  -2,-5,8,9, -3,-6,-8,10),
+                 "tagecat1:on_low"=c(1,2,3, 4,  -1,5,6,7,  -2,-5,8,9, -3,-6,-8,10),
+                 "tagecat2:on_high"=c(1,2,3, 4,  -1,5,6,7,  -2,-5,8,9, -3,-6,-8,10),
+                 "tagecat2:on_low"=c(1,2,3, 4,  -1,5,6,7,  -2,-5,8,9, -3,-6,-8,10)
+                 )
+promote.fit= msm(state~obstime, subject = id, data=msdat,
+          obstype=2,
+          qmatrix = Q.start,
+          gen.inits = FALSE, 
+          analyticp = TRUE,
+          center = TRUE,
+          qconstraint = qconstraint,
+          covariates =~tagecat*(on_high+on_low)+ddmt_high+ddmt_low+sex+tsymp+progstat+dd+tdelay,   #no interaction with tdelay. tdelay as fixed effects instead.
+          constraint = constraint,
+          opt.method = "optim",
+          method="BFGS" ,
+          control = list ( trace = 2, REPORT = 1, maxit=5000,  fnscale=20838.38, reltol=1e-8))
+
+save(promote.fit, file="promote.fit.rdata")
+
+```
